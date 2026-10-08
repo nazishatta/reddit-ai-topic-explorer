@@ -1,0 +1,29 @@
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Original and processed Reddit data
+data/reddit_raw/
+data/processed/
+*.parquet
+
+# BERTopic and embedding artifacts
+models/
+artifacts/
+embeddings/
+checkpoints/
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# Local caches
+.cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Secrets
+.env
+.env.*
