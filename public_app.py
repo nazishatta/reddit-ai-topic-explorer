@@ -17,7 +17,7 @@ from sklearn.metrics import adjusted_rand_score
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC = ROOT / "public_assets"
-PROJECTIONS = ROOT / "public_assets" / "projections"
+PROJECTIONS = PUBLIC / "projections"
 CHARTS = PUBLIC / "charts"
 
 st.set_page_config(page_title="Reddit AI Topic Explorer · Public", page_icon="🧠", layout="wide")
@@ -44,20 +44,70 @@ def load_assets():
 try:
     documents, frequencies, info, z5 = load_assets()
 except Exception as exc:
-    st.error("Public assets are missing or invalid. See deployment logs for details.")
-    st.info("Check the public_assets folder in the deployment package.")
+    st.error(f"Public assets missing or invalid: {exc}")
+    st.info("Check the public_assets directory in the deployment package.")
     st.stop()
 
 names = dict(zip(info["Topic"], info["Name"]))
 documents["topic_label"] = documents["topic"].map(lambda t: "Unassigned (-1)" if t == -1 else f"{t}: {names.get(t, 'Topic')}")
 
-st.sidebar.header("Explore the corpus")
+# All navigation controls share Streamlit session state so they remain consistent
+# across the BERTopic and embedding tabs.
 communities = sorted(documents["subreddit"].unique().tolist())
-selected_communities = st.sidebar.multiselect("Reddit communities", communities, default=communities)
-view = documents.loc[documents["subreddit"].isin(selected_communities)].copy()
-st.sidebar.caption("The public release excludes individual Reddit post text and original post IDs.")
+if "sidebar_communities" not in st.session_state:
+    st.session_state.sidebar_communities = communities
+if "sidebar_topic" not in st.session_state:
+    st.session_state.sidebar_topic = "all"
+if "sidebar_outliers" not in st.session_state:
+    st.session_state.sidebar_outliers = True
+if "sidebar_color" not in st.session_state:
+    st.session_state.sidebar_color = "subreddit"
+
+
+def reset_sidebar_filters():
+    st.session_state.sidebar_communities = communities
+    st.session_state.sidebar_topic = "all"
+    st.session_state.sidebar_outliers = True
+    st.session_state.sidebar_color = "subreddit"
+
+
+st.sidebar.header("🧠 Explore the corpus")
+selected_communities = st.sidebar.multiselect(
+    "Reddit communities", communities, key="sidebar_communities"
+)
+st.sidebar.divider()
+st.sidebar.subheader("Topic exploration")
+all_topic_ids = sorted(int(t) for t in documents.loc[documents["topic"] != -1, "topic"].unique())
+topic_options = ["all"] + [str(t) for t in all_topic_ids]
+selected_topic_choice = st.sidebar.selectbox(
+    "Highlight a BERTopic topic",
+    topic_options,
+    format_func=lambda val: "All topics" if val == "all" else f"Topic {val} · {names.get(int(val), 'Topic')}",
+    key="sidebar_topic",
+    help="Highlights this topic in BERTopic Studio and Embedding Atlas; it does not retrain the model.",
+)
+include_outliers = st.sidebar.checkbox(
+    "Include unassigned documents", key="sidebar_outliers"
+)
+st.sidebar.selectbox(
+    "Color the embedding atlas by",
+    ["subreddit", "topic_label"],
+    format_func=lambda item: "Reddit community" if item == "subreddit" else "BERTopic topic",
+    key="sidebar_color",
+)
+st.sidebar.button("↺ Reset filters", use_container_width=True, on_click=reset_sidebar_filters)
+st.sidebar.divider()
+st.sidebar.subheader("Corpus at a glance")
+sc1, sc2 = st.sidebar.columns(2)
+sc1.metric("Documents", f"{len(documents):,}")
+sc2.metric("Topics", len(all_topic_ids))
+st.sidebar.caption("Public view: aggregated statistics and synthetic document IDs only. Original Reddit post text and IDs are excluded.")
+
+community_view = documents.loc[documents["subreddit"].isin(selected_communities)].copy()
+view = community_view if include_outliers else community_view.loc[community_view["topic"] != -1].copy()
+selected_topic = None if selected_topic_choice == "all" else int(selected_topic_choice)
 if view.empty:
-    st.warning("Select at least one community.")
+    st.warning("No documents match the sidebar filters. Select a community or enable unassigned documents.")
     st.stop()
 
 c1, c2, c3, c4 = st.columns(4)
@@ -96,24 +146,35 @@ with tab1:
 
 with tab2:
     st.subheader("Saved BERTopic model")
-    choices = sorted(view["topic"].unique().tolist())
-    selected_topic = st.selectbox("Inspect a topic", choices, format_func=lambda t: "Unassigned (-1)" if t == -1 else f"{t}: {names.get(t, '')}")
-    selected_posts = view[view["topic"] == selected_topic]
-    st.metric("Visible documents assigned to selected topic", len(selected_posts))
-    if selected_topic != -1:
+    if selected_topic is None:
+        st.info("Choose a topic from the sidebar to highlight its documents here and in the Embedding Atlas.")
+        selected_posts = view
+    else:
+        selected_posts = view.loc[view["topic"] == selected_topic]
+        st.metric("Visible documents assigned to highlighted topic", len(selected_posts))
         matching = info.loc[info["Topic"] == selected_topic]
         if not matching.empty and "Representation" in matching:
             st.caption(f"Topic keywords: {matching.iloc[0]['Representation']}")
-    view["selection"] = np.where(view["topic"].eq(selected_topic), "Selected topic", "Other topics")
-    fig = px.scatter(view, x="x", y="y", color="selection", hover_data=["doc_id", "subreddit"],
-                     color_discrete_map={"Selected topic": "#60d3c0", "Other topics": "#687586"},
-                     title="Selected-topic documents in the 2D projection", template="plotly_dark", render_mode="webgl")
+    topic_plot = view.copy()
+    if selected_topic is None:
+        topic_plot["selection"] = topic_plot["topic_label"]
+    else:
+        topic_plot["selection"] = np.where(
+            topic_plot["topic"].eq(selected_topic), "Selected topic", "Other topics"
+        )
+    fig = px.scatter(
+        topic_plot, x="x", y="y", color="selection",
+        hover_data=["doc_id", "subreddit"],
+        color_discrete_map={"Selected topic": "#60d3c0", "Other topics": "#687586"},
+        title="BERTopic documents in the 2D projection",
+        template="plotly_dark", render_mode="webgl",
+    )
     fig.update_traces(marker={"size": 5, "opacity": 0.7})
     fig.update_layout(height=480)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Reveals: the model's topic groupings and how selected documents appear in a 2D projection. "
-               "May mislead: generated topic labels are interpretations, not verified ground truth; "
-               "UMAP projections can distort apparent separations.")
+    st.caption("Reveals: topic assignments and their projected positions. May mislead: topics are inferred, "
+               "not ground truth, and UMAP can distort distances. The topic selector highlights "
+               "rather than retraining or changing the full-corpus chart below.")
     chart_options = {
         "Topic keywords (c-TF-IDF)": "topic_keywords.json",
         "Intertopic distance": "topic_map.json",
@@ -168,11 +229,19 @@ with tab3:
 
 with tab4:
     st.subheader("Semantic embedding projection")
-    color = st.selectbox("Color by", ["subreddit", "topic_label"], format_func=lambda x: "Subreddit" if x == "subreddit" else "Saved BERTopic topic")
-    include_outliers = st.checkbox("Include unassigned documents", value=True)
-    atlas = view if include_outliers else view[view["topic"] != -1]
+    atlas = view.copy()
+    if selected_topic is None:
+        color = st.session_state.sidebar_color
+    else:
+        atlas["highlighted_topic"] = np.where(
+            atlas["topic"] == selected_topic, "Selected topic", "Other topics"
+        )
+        color = "highlighted_topic"
+        st.caption("The sidebar topic selection takes precedence over the atlas color setting. "
+                   "Reset the topic selector to 'All topics' to color by community or topic.")
     fig = px.scatter(atlas, x="x", y="y", color=color, hover_data=["doc_id", "subreddit"],
-                     title="MiniLM document embeddings projected with UMAP", template="plotly_dark", render_mode="webgl")
+                     title="MiniLM document embeddings projected with UMAP", template="plotly_dark", render_mode="webgl",
+                     color_discrete_map={"Selected topic": "#60d3c0", "Other topics": "#687586"})
     fig.update_traces(marker={"size": 5, "opacity": 0.7})
     fig.update_layout(height=720, xaxis_title="UMAP 1", yaxis_title="UMAP 2")
     st.plotly_chart(fig, use_container_width=True)
